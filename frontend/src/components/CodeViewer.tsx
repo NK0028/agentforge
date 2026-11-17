@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { FolderTree, FileCode, Copy, Check, Download } from 'lucide-react';
 import { GeneratedFile } from '../types/agent';
+import { API_BASE } from '../services/api';
 
 interface CodeViewerProps {
   files: GeneratedFile[];
@@ -23,7 +24,7 @@ export const CodeViewer: React.FC<CodeViewerProps> = ({ files, projectId }) => {
 
   const handleDownloadZip = () => {
     if (projectId) {
-      window.location.href = `http://localhost:8000/api/agent/export/${projectId}`;
+      window.location.href = `${API_BASE}/agent/export/${projectId}`;
     }
   };
 

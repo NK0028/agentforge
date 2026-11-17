@@ -4,6 +4,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.services.workspace import WorkspaceService
+from app.core.utils import get_timestamp, extract_and_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,11 @@ Files Created: {json.dumps(files)}
             SystemMessage(content=DOCGEN_SYSTEM_PROMPT),
             HumanMessage(content=user_prompt)
         ])
-        doc_data = json.loads(response.content)
-        readme_content = doc_data.get("readme_content", f"# {project_name}\n\n{summary}\n")
+        doc_data = extract_and_parse_json(response.content)
+        if doc_data and "readme_content" in doc_data:
+            readme_content = doc_data["readme_content"]
+        else:
+            readme_content = response.content.strip() or f"# {project_name}\n\n{summary}\n"
     except Exception as e:
         logger.error(f"DocGen LLM error: {e}")
         readme_content = f"# {project_name}\n\n> {summary}\n\n## Generated Files\n" + "\n".join([f"- `{f}`" for f in files])
@@ -69,7 +73,7 @@ Files Created: {json.dumps(files)}
     state["logs"].append({
         "agent": "DocGen",
         "message": f"📝 Generated application README.md documentation file: [{saved_path}]",
-        "timestamp": "now"
+        "timestamp": get_timestamp()
     })
 
     return state

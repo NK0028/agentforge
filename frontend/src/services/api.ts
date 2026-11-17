@@ -1,6 +1,7 @@
 import { SystemStatus, GeneratedFile } from '../types/agent';
 
-const API_BASE = 'http://localhost:8000/api';
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+export const API_HOST = API_BASE.replace(/\/api\/?$/, '');
 
 export async function fetchHealth(): Promise<SystemStatus> {
   try {

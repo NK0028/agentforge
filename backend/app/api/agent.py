@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import asyncio
 import uuid
 import zipfile
@@ -12,6 +13,9 @@ from sse_starlette.sse import EventSourceResponse
 from app.graph.workflow import agent_graph
 from app.services.workspace import WorkspaceService
 from app.services.memory import memory_service
+from app.core.utils import get_timestamp
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["Agent Operations"])
 
@@ -27,8 +31,126 @@ PROJECT_STREAMS: Dict[str, asyncio.Queue] = {}
 PROJECT_STATES: Dict[str, Dict[str, Any]] = {}
 
 
+async def _stream_workflow(project_id: str, state_input: Dict[str, Any]):
+    """
+    Core execution loop for LangGraph multi-agent pipeline.
+    Maintains full cumulative state, deduplicates log/file events,
+    and streams structured SSE events to connected frontend clients.
+    """
+    queue = PROJECT_STREAMS.get(project_id)
+    current_state = dict(state_input)
+    PROJECT_STATES[project_id] = current_state
+
+    # Track indexes to only broadcast NEW logs and NEW files
+    last_log_idx = len(current_state.get("logs", []))
+    emitted_file_paths = {f["path"] for f in current_state.get("generated_files", [])}
+
+    try:
+        # stream() yields {node_name: node_output_delta}
+        for output in agent_graph.stream(current_state):
+            for node_name, delta in output.items():
+                if isinstance(delta, dict):
+                    current_state.update(delta)
+                PROJECT_STATES[project_id] = current_state
+
+                # 1. Stream ONLY new logs (fixes O(n^2) log broadcast bug)
+                all_logs = current_state.get("logs", [])
+                new_logs = all_logs[last_log_idx:]
+                for log in new_logs:
+                    if queue:
+                        await queue.put({"event": "log", "data": json.dumps(log)})
+                last_log_idx = len(all_logs)
+
+                # 2. Stream comprehensive status snapshot
+                if queue:
+                    await queue.put({
+                        "event": "status",
+                        "data": json.dumps({
+                            "current_step": current_state.get("current_step"),
+                            "active_agent": current_state.get("active_agent"),
+                            "awaiting_approval": current_state.get("awaiting_approval", False),
+                            "plan": current_state.get("plan"),
+                            "architecture": current_state.get("architecture"),
+                            "file_count": len(current_state.get("generated_files", [])),
+                            "retry_count": current_state.get("retry_count", 0),
+                            "test_results": current_state.get("test_results"),
+                            "review_report": current_state.get("review_report")
+                        })
+                    })
+
+                # 3. Dedicated test_results event
+                if node_name == "tester" and current_state.get("test_results"):
+                    if queue:
+                        await queue.put({
+                            "event": "test_results",
+                            "data": json.dumps(current_state["test_results"])
+                        })
+
+                # 4. Dedicated review_report event
+                if node_name == "reviewer" and current_state.get("review_report"):
+                    if queue:
+                        await queue.put({
+                            "event": "review_report",
+                            "data": json.dumps(current_state["review_report"])
+                        })
+
+                # 5. Handle Human-In-The-Loop pause condition
+                if current_state.get("awaiting_approval"):
+                    if queue:
+                        await queue.put({
+                            "event": "awaiting_approval",
+                            "data": json.dumps({
+                                "project_id": project_id,
+                                "architecture": current_state.get("architecture")
+                            })
+                        })
+                    return  # Yield control back to await HITL resume API call
+
+                # 6. Stream only NEW files (fixes duplicate file broadcast bug)
+                if node_name in ["coder", "docgen", "deployer"]:
+                    for f in current_state.get("generated_files", []):
+                        if f["path"] not in emitted_file_paths:
+                            emitted_file_paths.add(f["path"])
+                            if queue:
+                                await queue.put({
+                                    "event": "file_created",
+                                    "data": json.dumps({"path": f["path"], "content": f["content"]})
+                                })
+
+                # 7. Stream patched files on debugger output
+                if node_name == "debugger":
+                    for f in current_state.get("generated_files", []):
+                        if queue:
+                            await queue.put({
+                                "event": "file_patched",
+                                "data": json.dumps({"path": f["path"], "content": f["content"]})
+                            })
+
+        # Pipeline completed successfully
+        if not current_state.get("awaiting_approval"):
+            if queue:
+                await queue.put({
+                    "event": "complete",
+                    "data": json.dumps({"project_id": project_id, "status": "COMPLETED"})
+                })
+
+    except Exception as e:
+        logger.error(f"Error executing agent workflow for [{project_id}]: {e}", exc_info=True)
+        if queue:
+            await queue.put({
+                "event": "error",
+                "data": json.dumps({"error": str(e), "project_id": project_id})
+            })
+
+
 async def run_agent_workflow(project_id: str, prompt: str, model_name: str):
     queue = PROJECT_STREAMS.get(project_id)
+
+    initial_log = {
+        "agent": "System",
+        "message": f"🚀 Initializing AgentForge project session [{project_id}]",
+        "timestamp": get_timestamp()
+    }
 
     initial_state = {
         "project_id": project_id,
@@ -48,7 +170,7 @@ async def run_agent_workflow(project_id: str, prompt: str, model_name: str):
         "awaiting_approval": False,
         "docs_generated": [],
         "deployment_files": [],
-        "logs": [],
+        "logs": [initial_log],
         "next_node": "supervisor",
         "error": None
     }
@@ -58,81 +180,10 @@ async def run_agent_workflow(project_id: str, prompt: str, model_name: str):
     if queue:
         await queue.put({
             "event": "log",
-            "data": json.dumps({
-                "agent": "System",
-                "message": f"🚀 Initializing AgentForge project session [{project_id}]",
-                "timestamp": "now"
-            })
+            "data": json.dumps(initial_log)
         })
 
-    try:
-        for output in agent_graph.stream(initial_state):
-            for node_name, updated_state in output.items():
-                PROJECT_STATES[project_id] = updated_state
-
-                # Stream logs
-                for log in updated_state.get("logs", []):
-                    if queue:
-                        await queue.put({"event": "log", "data": json.dumps(log)})
-
-                # Stream execution status
-                if queue:
-                    await queue.put({
-                        "event": "status",
-                        "data": json.dumps({
-                            "current_step": updated_state.get("current_step"),
-                            "active_agent": updated_state.get("active_agent"),
-                            "awaiting_approval": updated_state.get("awaiting_approval", False),
-                            "plan": updated_state.get("plan"),
-                            "architecture": updated_state.get("architecture"),
-                            "file_count": len(updated_state.get("generated_files", [])),
-                            "retry_count": updated_state.get("retry_count", 0),
-                            "test_results": updated_state.get("test_results"),
-                            "review_report": updated_state.get("review_report")
-                        })
-                    })
-
-                # If state paused at HITL checkpoint
-                if updated_state.get("awaiting_approval"):
-                    if queue:
-                        await queue.put({
-                            "event": "awaiting_approval",
-                            "data": json.dumps({
-                                "project_id": project_id,
-                                "architecture": updated_state.get("architecture")
-                            })
-                        })
-                    return
-
-                # Stream files
-                if node_name in ["coder", "docgen", "deployer"]:
-                    for f in updated_state.get("generated_files", []):
-                        if queue:
-                            await queue.put({
-                                "event": "file_created",
-                                "data": json.dumps({"path": f["path"], "content": f["content"]})
-                            })
-
-                if node_name == "debugger":
-                    for f in updated_state.get("generated_files", []):
-                        if queue:
-                            await queue.put({
-                                "event": "file_patched",
-                                "data": json.dumps({"path": f["path"], "content": f["content"]})
-                            })
-
-        if queue:
-            await queue.put({
-                "event": "complete",
-                "data": json.dumps({"project_id": project_id, "status": "COMPLETED"})
-            })
-
-    except Exception as e:
-        if queue:
-            await queue.put({
-                "event": "error",
-                "data": json.dumps({"error": str(e), "project_id": project_id})
-            })
+    await _stream_workflow(project_id, initial_state)
 
 
 @router.post("/run")
@@ -160,7 +211,7 @@ async def resume_project(project_id: str, req: HITLResumeRequest, bg_tasks: Back
         state["logs"].append({
             "agent": "System",
             "message": "❌ Human Developer rejected current architecture design.",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         })
         return {"status": "REJECTED"}
 
@@ -178,7 +229,7 @@ async def resume_project(project_id: str, req: HITLResumeRequest, bg_tasks: Back
             "data": json.dumps({
                 "agent": "HumanDeveloper",
                 "message": "✅ Architecture approved by Human Developer. Resuming pipeline execution...",
-                "timestamp": "now"
+                "timestamp": get_timestamp()
             })
         })
 
@@ -189,50 +240,7 @@ async def resume_project(project_id: str, req: HITLResumeRequest, bg_tasks: Back
 
 
 async def resume_agent_workflow(project_id: str, current_state: Dict[str, Any]):
-    queue = PROJECT_STREAMS.get(project_id)
-    try:
-        for output in agent_graph.stream(current_state):
-            for node_name, updated_state in output.items():
-                PROJECT_STATES[project_id] = updated_state
-
-                for log in updated_state.get("logs", []):
-                    if queue:
-                        await queue.put({"event": "log", "data": json.dumps(log)})
-
-                if queue:
-                    await queue.put({
-                        "event": "status",
-                        "data": json.dumps({
-                            "current_step": updated_state.get("current_step"),
-                            "active_agent": updated_state.get("active_agent"),
-                            "plan": updated_state.get("plan"),
-                            "architecture": updated_state.get("architecture"),
-                            "file_count": len(updated_state.get("generated_files", [])),
-                            "retry_count": updated_state.get("retry_count", 0),
-                            "test_results": updated_state.get("test_results"),
-                            "review_report": updated_state.get("review_report")
-                        })
-                    })
-
-                if node_name in ["coder", "docgen", "deployer"]:
-                    for f in updated_state.get("generated_files", []):
-                        if queue:
-                            await queue.put({
-                                "event": "file_created",
-                                "data": json.dumps({"path": f["path"], "content": f["content"]})
-                            })
-
-        if queue:
-            await queue.put({
-                "event": "complete",
-                "data": json.dumps({"project_id": project_id, "status": "COMPLETED"})
-            })
-    except Exception as e:
-        if queue:
-            await queue.put({
-                "event": "error",
-                "data": json.dumps({"error": str(e), "project_id": project_id})
-            })
+    await _stream_workflow(project_id, current_state)
 
 
 @router.get("/stream/{project_id}")

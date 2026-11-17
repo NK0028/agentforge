@@ -11,18 +11,24 @@ class WorkspaceService:
         self.sandbox_path = os.path.abspath(os.path.join(settings.WORKSPACE_DIR, project_id))
         os.makedirs(self.sandbox_path, exist_ok=True)
 
+    def get_absolute_path(self, relative_path: str) -> str:
+        """
+        Safely computes the absolute path inside project sandbox.
+        Prevents path traversal outside sandbox_path.
+        """
+        clean_rel_path = relative_path.lstrip("/\\")
+        target_path = os.path.abspath(os.path.join(self.sandbox_path, clean_rel_path))
+        if not target_path.startswith(self.sandbox_path):
+            raise ValueError(f"Path traversal security violation: {relative_path}")
+        return target_path
+
     def write_file(self, relative_path: str, content: str) -> str:
         """
         Safely writes file content inside project sandbox.
         Prevents path traversal outside sandbox_path.
         """
-        # Clean leading slashes
-        clean_rel_path = relative_path.lstrip("/\\")
-        target_path = os.path.abspath(os.path.join(self.sandbox_path, clean_rel_path))
-
-        # Security check: Ensure target_path starts with sandbox_path
-        if not target_path.startswith(self.sandbox_path):
-            raise ValueError(f"Path traversal security violation: {relative_path}")
+        target_path = self.get_absolute_path(relative_path)
+        clean_rel_path = os.path.relpath(target_path, self.sandbox_path)
 
         # Ensure parent directory exists
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -32,6 +38,16 @@ class WorkspaceService:
 
         logger.info(f"Successfully wrote file: {clean_rel_path}")
         return clean_rel_path
+
+    def read_file(self, relative_path: str) -> str:
+        """
+        Safely reads file content from inside project sandbox.
+        """
+        target_path = self.get_absolute_path(relative_path)
+        if not os.path.exists(target_path):
+            return ""
+        with open(target_path, "r", encoding="utf-8") as f:
+            return f.read()
 
     def list_files(self) -> List[Dict[str, Any]]:
         """

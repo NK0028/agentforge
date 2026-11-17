@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Database, Search, Sparkles, FileCode, Server } from 'lucide-react';
+import { API_BASE } from '../services/api';
 
 interface MemoryHit {
   content: string;
@@ -23,7 +24,7 @@ export const MemoryViewer: React.FC = () => {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/agent/memory/stats');
+      const res = await fetch(`${API_BASE}/agent/memory/stats`);
       const data = await res.json();
       setStats(data);
     } catch {
@@ -36,7 +37,7 @@ export const MemoryViewer: React.FC = () => {
     if (!query.trim()) return;
     setLoading(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/agent/memory/search?q=${encodeURIComponent(query)}&n=4`);
+      const res = await fetch(`${API_BASE}/agent/memory/search?q=${encodeURIComponent(query)}&n=4`);
       const data = await res.json();
       setHits(data.hits || []);
     } catch {

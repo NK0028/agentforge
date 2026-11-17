@@ -35,9 +35,10 @@ jobs:
           python -m py_compile app/agents/deployer.py
           python -m py_compile app/graph/state.py
           python -m py_compile app/graph/workflow.py
+          python -m py_compile app/core/utils.py
           python -m py_compile app/services/workspace.py
           python -m py_compile app/services/memory.py
-          echo "✅ All 14 backend modules compiled successfully!"
+          echo "✅ All backend modules compiled successfully!"
 
   frontend-build:
     name: Frontend — TypeScript & Vite Build

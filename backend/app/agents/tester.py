@@ -5,6 +5,7 @@ from typing import Dict, Any
 from app.graph.state import AgentState
 from app.services.workspace import WorkspaceService
 from app.core.config import settings
+from app.core.utils import get_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def tester_node(state: AgentState) -> AgentState:
             all_errors.append(error_entry)
             log_msg = f"✗ [{file_path}] — Syntax check FAILED: {check.get('stderr', '')[:200]}"
 
-        state["logs"].append({"agent": "Tester", "message": log_msg, "timestamp": "now"})
+        state["logs"].append({"agent": "Tester", "message": log_msg, "timestamp": get_timestamp()})
 
     overall_passed = total_failed == 0
 
@@ -121,7 +122,7 @@ def tester_node(state: AgentState) -> AgentState:
         f"Test suite complete: {total_passed}/{len(generated_files)} files passed. "
         f"{'✅ All clear!' if overall_passed else f'⚠️ {total_failed} file(s) require debugging.'}"
     )
-    state["logs"].append({"agent": "Tester", "message": summary_msg, "timestamp": "now"})
+    state["logs"].append({"agent": "Tester", "message": summary_msg, "timestamp": get_timestamp()})
     logger.info(summary_msg)
 
     return state

@@ -1,6 +1,7 @@
 import json
 import logging
 from app.graph.state import AgentState
+from app.core.utils import get_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ def supervisor_node(state: AgentState) -> AgentState:
     state["logs"].append({
         "agent": "Supervisor",
         "message": f"Decision → [{next_node.upper()}] | {reasoning}",
-        "timestamp": "now"
+        "timestamp": get_timestamp()
     })
 
     logger.info(f"Supervisor routing to: {next_node} — {reasoning}")

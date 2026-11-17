@@ -1,9 +1,11 @@
 import json
+import re
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.services.workspace import WorkspaceService
+from app.core.utils import get_timestamp, extract_and_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +66,10 @@ def debugger_node(state: AgentState) -> AgentState:
         state["logs"].append({
             "agent": "Debugger",
             "message": f"⚠️ Max retry limit ({MAX_RETRY_LIMIT}) reached. Proceeding with current code state.",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         })
         # Mark tests as passed to exit the loop gracefully
-        if state["test_results"]:
+        if state.get("test_results"):
             state["test_results"]["overall_passed"] = True
         return state
 
@@ -75,7 +77,7 @@ def debugger_node(state: AgentState) -> AgentState:
         state["logs"].append({
             "agent": "Debugger",
             "message": "No errors found to debug. All files passed.",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         })
         return state
 
@@ -98,11 +100,13 @@ def debugger_node(state: AgentState) -> AgentState:
             if f["path"] == file_path:
                 original_code = f.get("content", "")
                 break
+        if not original_code:
+            original_code = workspace.read_file(file_path)
 
         state["logs"].append({
             "agent": "Debugger",
             "message": f"🔍 Analyzing failure in [{file_path}]: {stderr[:150]}...",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         })
 
         try:
@@ -116,10 +120,19 @@ def debugger_node(state: AgentState) -> AgentState:
                 SystemMessage(content=DEBUGGER_SYSTEM_PROMPT),
                 HumanMessage(content=prompt)
             ])
-            fix_data = json.loads(response.content)
-            fixed_code = fix_data.get("code", original_code)
-            root_cause = fix_data.get("root_cause", "Unknown")
-            fix_summary = fix_data.get("fix_summary", "Patch applied.")
+            fix_data = extract_and_parse_json(response.content)
+            if fix_data and "code" in fix_data:
+                fixed_code = fix_data["code"]
+                root_cause = fix_data.get("root_cause", "Syntax error diagnosed and fixed.")
+                fix_summary = fix_data.get("fix_summary", "Patched syntax/logic issue.")
+            else:
+                code_blocks = re.findall(r"```(?:\w+)?\s*([\s\S]*?)\s*```", response.content)
+                if code_blocks:
+                    fixed_code = code_blocks[0].strip()
+                    root_cause = "Code block extracted directly from LLM response."
+                    fix_summary = "Applied code patch from LLM."
+                else:
+                    raise ValueError(f"Could not parse code from response: {response.content[:200]}")
 
         except Exception as e:
             logger.error(f"Debugger LLM error on {file_path}: {e}")
@@ -149,7 +162,7 @@ def debugger_node(state: AgentState) -> AgentState:
         state["logs"].append({
             "agent": "Debugger",
             "message": f"✅ Patch applied to [{file_path}]: {fix_summary}",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         })
 
     state["generated_files"] = patched_files

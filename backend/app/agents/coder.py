@@ -1,10 +1,12 @@
 import json
 import logging
+import re
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.services.workspace import WorkspaceService
 from app.services.memory import memory_service
+from app.core.utils import get_timestamp, extract_and_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +57,18 @@ def coder_node(state: AgentState) -> AgentState:
                 SystemMessage(content="You are a JSON-only software developer."),
                 HumanMessage(content=prompt_str)
             ])
-            code_data = json.loads(response.content)
-            code_content = code_data.get("code", f"# {purpose}\nprint('Hello from {file_path}')\n")
+            code_data = extract_and_parse_json(response.content)
+            if code_data and "code" in code_data:
+                code_content = code_data["code"]
+            else:
+                # Fallback: Extract code block if LLM returned markdown code directly
+                code_blocks = re.findall(r"```(?:\w+)?\s*([\s\S]*?)\s*```", response.content)
+                if code_blocks:
+                    code_content = code_blocks[0].strip()
+                elif len(response.content.strip()) > 30:
+                    code_content = response.content.strip()
+                else:
+                    code_content = f"# {purpose}\nprint('Hello from {file_path}')\n"
         except Exception as e:
             logger.error(f"Coder model error on {file_path}: {e}")
             code_content = f"# Generated code for {file_path}\n# Purpose: {purpose}\n\ndef main():\n    print('AgentForge generated module: {file_path}')\n\nif __name__ == '__main__':\n    main()\n"
@@ -68,7 +80,7 @@ def coder_node(state: AgentState) -> AgentState:
         state["logs"].append({
             "agent": "Coder",
             "message": f"Successfully generated & saved source file: [{clean_path}]",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         })
 
     state["generated_files"] = generated_files

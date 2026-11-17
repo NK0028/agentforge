@@ -2,6 +2,7 @@ import json
 import logging
 from app.graph.state import AgentState
 from app.services.workspace import WorkspaceService
+from app.core.utils import get_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ jobs:
     state["logs"].append({
         "agent": "Deployer",
         "message": f"🐳 Generated DevOps deployment manifests: Dockerfile, docker-compose.yml, CI/CD pipeline.",
-        "timestamp": "now"
+        "timestamp": get_timestamp()
     })
 
     return state

@@ -4,6 +4,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.services.memory import memory_service
+from app.core.utils import get_timestamp, extract_and_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,9 @@ def reviewer_node(state: AgentState) -> AgentState:
                 files_block=files_block
             ))
         ])
-        report = json.loads(response.content)
+        report = extract_and_parse_json(response.content)
+        if not report or "overall_score" not in report:
+            raise ValueError(f"Could not parse valid review report JSON: {response.content[:200]}")
 
     except Exception as e:
         logger.error(f"Reviewer Agent LLM error: {e}")
@@ -102,7 +105,7 @@ def reviewer_node(state: AgentState) -> AgentState:
         state["logs"].append({
             "agent": "Reviewer",
             "message": f"💾 Memory Base: Indexed {chunks_indexed} code chunks for project [{state['project_id']}] into ChromaDB.",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         })
     except Exception as me:
         logger.warning(f"Memory indexing failed: {me}")
@@ -117,7 +120,7 @@ def reviewer_node(state: AgentState) -> AgentState:
     state["logs"].append({
         "agent": "Reviewer",
         "message": summary_msg,
-        "timestamp": "now"
+        "timestamp": get_timestamp()
     })
 
     return state

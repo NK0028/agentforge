@@ -3,6 +3,7 @@ import logging
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.llm import get_llm
 from app.graph.state import AgentState
+from app.core.utils import get_timestamp, extract_and_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +49,16 @@ def planner_node(state: AgentState) -> AgentState:
             HumanMessage(content=prompt_str)
         ])
         
-        plan_data = json.loads(response.content)
+        plan_data = extract_and_parse_json(response.content)
+        if not plan_data:
+            raise ValueError(f"Could not parse valid JSON from response: {response.content[:200]}")
+
         state["plan"] = plan_data
         
         log_entry = {
             "agent": "Planner",
             "message": f"Generated Project Plan: '{plan_data.get('project_name')}' with {len(plan_data.get('milestones', []))} milestones.",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         }
     except Exception as e:
         logger.error(f"Planner Agent error: {e}")
@@ -71,7 +75,7 @@ def planner_node(state: AgentState) -> AgentState:
         log_entry = {
             "agent": "Planner",
             "message": f"Generated fallback project plan due to format issue: {e}",
-            "timestamp": "now"
+            "timestamp": get_timestamp()
         }
         
     state["logs"].append(log_entry)

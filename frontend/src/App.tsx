@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header';
 import { AgentDAG } from './components/AgentDAG';
 import { ProjectInput } from './components/ProjectInput';
@@ -8,7 +8,7 @@ import { TestResultsPanel } from './components/TestResultsPanel';
 import { ReviewScoreCard } from './components/ReviewScoreCard';
 import { MemoryViewer } from './components/MemoryViewer';
 import { HITLApprovalModal } from './components/HITLApprovalModal';
-import { fetchHealth, startProjectRun, fetchWorkspaceFiles } from './services/api';
+import { fetchHealth, startProjectRun, fetchWorkspaceFiles, API_BASE, API_HOST } from './services/api';
 import { SystemStatus, LogEvent, GeneratedFile, TestResults, ReviewReport, ArchitectureSpec } from './types/agent';
 
 export function App() {
@@ -28,6 +28,7 @@ export function App() {
   // HITL Approval State
   const [awaitingApproval, setAwaitingApproval] = useState<boolean>(false);
   const [architectureSpec, setArchitectureSpec] = useState<ArchitectureSpec | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     fetchHealth().then(data => {
@@ -36,6 +37,10 @@ export function App() {
         setSelectedModel(data.ollama.available_models[0]);
       }
     });
+
+    return () => {
+      eventSourceRef.current?.close();
+    };
   }, []);
 
   const handleStartProject = async (prompt: string) => {
@@ -66,7 +71,15 @@ export function App() {
   };
 
   const listenToStream = (streamUrl: string, projectId: string) => {
-    const eventSource = new EventSource(`http://localhost:8000${streamUrl}`);
+    // Close any prior stream connection to prevent duplicate events
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
+    const streamEndpoint = `${API_HOST}${streamUrl}`;
+    const eventSource = new EventSource(streamEndpoint);
+    eventSourceRef.current = eventSource;
 
     eventSource.addEventListener('log', (e: MessageEvent) => {
       const data: LogEvent = JSON.parse(e.data);
@@ -124,7 +137,7 @@ export function App() {
       setLogs(l => [...l, {
         agent: 'System',
         message: '🎉 AgentForge 9-Node Pipeline Completed Successfully!',
-        timestamp: 'now'
+        timestamp: new Date().toISOString()
       }]);
       if (projectId) {
         fetchWorkspaceFiles(projectId).then(files => {
@@ -132,11 +145,31 @@ export function App() {
         });
       }
       eventSource.close();
+      eventSourceRef.current = null;
+    });
+
+    eventSource.addEventListener('error', (e: any) => {
+      try {
+        if (e.data) {
+          const errData = JSON.parse(e.data);
+          setLogs(l => [...l, {
+            agent: 'System',
+            message: `❌ Pipeline Error: ${errData.error || 'Unknown error'}`,
+            timestamp: new Date().toISOString()
+          }]);
+        }
+      } catch {}
+      setIsProcessing(false);
+      eventSource.close();
+      eventSourceRef.current = null;
     });
 
     eventSource.onerror = () => {
-      setIsProcessing(false);
-      eventSource.close();
+      // Reconnection or close
+      if (eventSource.readyState === EventSource.CLOSED) {
+        setIsProcessing(false);
+        eventSourceRef.current = null;
+      }
     };
   };
 
@@ -145,17 +178,19 @@ export function App() {
     setAwaitingApproval(false);
 
     try {
-      const res = await fetch(`http://localhost:8000/api/agent/resume/${currentProjectId}`, {
+      const res = await fetch(`${API_BASE}/agent/resume/${currentProjectId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approved: true, modified_files: modifiedFiles })
       });
       const data = await res.json();
       if (data.status === 'RESUMED') {
-        listenToStream(`/api/agent/stream/${currentProjectId}`, currentProjectId);
+        if (!eventSourceRef.current || eventSourceRef.current.readyState === EventSource.CLOSED) {
+          listenToStream(`/api/agent/stream/${currentProjectId}`, currentProjectId);
+        }
       }
     } catch (err: any) {
-      setLogs(l => [...l, { agent: 'System', message: `❌ Error resuming run: ${err.message}`, timestamp: 'now' }]);
+      setLogs(l => [...l, { agent: 'System', message: `❌ Error resuming run: ${err.message}`, timestamp: new Date().toISOString() }]);
     }
   };
 
@@ -163,11 +198,15 @@ export function App() {
     if (!currentProjectId) return;
     setAwaitingApproval(false);
     setIsProcessing(false);
-    await fetch(`http://localhost:8000/api/agent/resume/${currentProjectId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approved: false })
-    });
+    try {
+      await fetch(`${API_BASE}/agent/resume/${currentProjectId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved: false })
+      });
+    } catch {}
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
   };
 
   return (
